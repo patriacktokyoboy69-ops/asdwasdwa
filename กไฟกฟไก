@@ -1,0 +1,853 @@
+task.wait(2)
+
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+
+local afkMode = false
+local afkOverlay = nil
+local currentCheckIndex = 1
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local MAX_UNDERGROUND_OFFSET = 10
+local MIN_UNDERGROUND_OFFSET = 0
+local TELEPORT_NEAR_TREE_OFFSET = 25
+local HORIZONTAL_DISTANCE_THRESHOLD = 10000
+local SELL_WORLD_ID = 3475397644
+local FARM_WORLD_ID = 4869039553
+local farmStartTime = tick()
+local lastSafePosition = Vector3.new(0, 100, 0)
+
+-- ✅ ตัวแปรสำหรับจำกัดการอัพเดท UI
+local lastUIUpdate = 0
+local UI_UPDATE_INTERVAL = 2
+
+-- ✅ Cache
+local cachedRemotes = {}
+local cachedData = {}
+
+-- ✅ ปรับ timing ให้ช้าลง
+local ATTACK_WAIT = 0.15       -- หน่วง attack แต่ละครั้ง (เดิม 0.05)
+local ATTACK_REPEAT = 2        -- ยิงกี่ครั้งต่อรอบ (เดิม 3)
+local FARM_CHECK_INTERVAL = 2  -- เช็คทุก 2 วิ (เดิม 1)
+local PULL_INTERVAL = 1.0      -- ดึงไอเทมทุก 1 วิ (เดิม 0.5)
+local FLOAT_SPEED = 0.8        -- ความเร็วการลอยไปต้นไม้ (วินาที)
+local DESCENT_STEP = 2         -- ลงทีละกี่หน่วย (เดิม 5)
+local DESCENT_WAIT = 0.25      -- หน่วงระหว่างลง (วินาที)
+
+pcall(function()
+    local mobRemote = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+    if mobRemote then
+        local target = mobRemote:FindFirstChild("MobDamageRemote")
+        if target then
+            target:Destroy()
+            print("")
+        end
+    end
+end)
+
+task.spawn(function()
+    task.wait(2)
+    local remoteTeleport = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("WorldTeleportRemote")
+    if game.PlaceId ~= FARM_WORLD_ID then
+        print("🛫 วาร์ปไปโลกฟาร์ม...")
+        local args = { FARM_WORLD_ID, {} }
+        remoteTeleport:InvokeServer(unpack(args))
+    else
+        print("✅ อยู่ในโลกฟาร์มแล้ว")
+    end
+end)
+
+local watchedItems = {
+    "AvacadoFoodModel",
+    "CacaoBeanFoodModel", "CoconutFoodModel",
+}
+
+local targetNames = {
+    "AppleFoodModel", "LemonFoodModel", "CornFoodModel", "CarrotFoodModel", "PearFoodModel",
+    "StrawberryFoodModel", "PeachFoodModel", "PotatoFoodModel", "BroccoliFoodModel", "CherryFoodModel",
+    "BuleberryFoodModel", "MushroomFoodModel", "BananaFoodModel", "AlmondFoodModel", "OnionFoodModel",
+    "KelpFoodModel", "GrapesFoodModel", "WatermelonFoodModel", "PricklyPearFoodModel", "ChiliFoodModel",
+    "GlowingMushroomFoodModel", "PineappleFoodModel", "CottonCandyFoodModel", "JuniperBerryFoodModel",
+    "LimeFoodModel", "DragonfruitFoodModel", "AvacadoFoodModel", "CacaoBeanFoodModel", "CoconutFoodModel",
+    "EdamameFoodModel","KajiFruitFoodModel","MistSudachiFoodModel"
+}
+
+local isFarming = true
+
+local function createCombinedUI()
+    local screenGui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+    screenGui.Name = "NEXON_UI"
+    screenGui.ResetOnSpawn = false
+
+    local centerFrame = Instance.new("Frame", screenGui)
+    centerFrame.Size = UDim2.new(0, 600, 0, 0)
+    centerFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    centerFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    centerFrame.AutomaticSize = Enum.AutomaticSize.Y
+    centerFrame.BackgroundTransparency = 1
+    centerFrame.Name = "CenterFrame"
+
+    local layout = Instance.new("UIListLayout", centerFrame)
+    layout.FillDirection = Enum.FillDirection.Vertical
+    layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    layout.VerticalAlignment = Enum.VerticalAlignment.Center
+    layout.Padding = UDim.new(0, 10)
+
+    local hideButton = Instance.new("TextButton", centerFrame)
+    hideButton.Size = UDim2.new(1, 0, 0, 80)
+    hideButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+    hideButton.Text = "Hide GUI"
+    hideButton.Font = Enum.Font.GothamBlack
+    hideButton.TextSize = 24
+    hideButton.BorderSizePixel = 0
+    hideButton.Name = "HideButton"
+    Instance.new("UICorner", hideButton).CornerRadius = UDim.new(0, 10)
+
+    local hideStroke = Instance.new("UIStroke", hideButton)
+    hideStroke.Color = Color3.new(1, 1, 1)
+    hideStroke.Transparency = 0.3
+    hideStroke.Thickness = 3
+
+    local showButton = Instance.new("TextButton", screenGui)
+    showButton.Size = UDim2.new(0, 150, 0, 50)
+    showButton.Position = UDim2.new(0.5, -75, 0.1, 0)
+    showButton.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+    showButton.Text = "👁️ Show GUI"
+    showButton.Font = Enum.Font.GothamBlack
+    showButton.TextSize = 18
+    showButton.BorderSizePixel = 0
+    showButton.Name = "ShowButton"
+    showButton.Visible = false
+    Instance.new("UICorner", showButton).CornerRadius = UDim.new(0, 10)
+
+    local showStroke = Instance.new("UIStroke", showButton)
+    showStroke.Color = Color3.new(1, 1, 1)
+    showStroke.Transparency = 0.3
+    showStroke.Thickness = 2
+
+    local UserInputService = game:GetService("UserInputService")
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
+    showButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = showButton.Position
+            showButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+        end
+    end)
+
+    showButton.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                local delta = input.Position - dragStart
+                showButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                dragging = false
+                showButton.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+            end
+        end
+    end)
+
+    local isHidden = false
+    hideButton.MouseButton1Click:Connect(function()
+        isHidden = true
+        for _, child in pairs(centerFrame:GetChildren()) do
+            if child ~= layout then child.Visible = false end
+        end
+        showButton.Visible = true
+    end)
+
+    showButton.MouseButton1Click:Connect(function()
+        isHidden = false
+        for _, child in pairs(centerFrame:GetChildren()) do
+            if child ~= layout then child.Visible = true end
+        end
+        showButton.Visible = false
+    end)
+
+    local titleBox = Instance.new("TextLabel", centerFrame)
+    titleBox.Size = UDim2.new(1, 0, 0, 60)
+    titleBox.BackgroundColor3 = Color3.fromRGB(0, 200, 150)
+    titleBox.Text = "NEXON HUB | AFK COINS Shinrin [SLOW MODE]"
+    titleBox.Font = Enum.Font.GothamBlack
+    titleBox.TextSize = 24
+    titleBox.TextColor3 = Color3.new(1, 1, 1)
+    titleBox.BackgroundTransparency = 0.1
+    Instance.new("UICorner", titleBox).CornerRadius = UDim.new(0, 10)
+
+    local coinsBox = Instance.new("TextLabel", centerFrame)
+    coinsBox.Size = UDim2.new(1, 0, 0, 80)
+    coinsBox.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+    coinsBox.Text = "💰 Coins: 0"
+    coinsBox.Font = Enum.Font.GothamBlack
+    coinsBox.TextSize = 36
+    coinsBox.TextColor3 = Color3.fromRGB(0, 0, 0)
+    coinsBox.BackgroundTransparency = 0.1
+    Instance.new("UICorner", coinsBox).CornerRadius = UDim.new(0, 10)
+
+    local coinsStroke = Instance.new("UIStroke", coinsBox)
+    coinsStroke.Color = Color3.fromRGB(255, 255, 255)
+    coinsStroke.Transparency = 0.3
+    coinsStroke.Thickness = 3
+
+    local scrollFrame = Instance.new("ScrollingFrame", centerFrame)
+    scrollFrame.Size = UDim2.new(1, 0, 0, 120)
+    scrollFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    scrollFrame.CanvasSize = UDim2.new(0, 2000, 0, 0)
+    scrollFrame.ScrollBarThickness = 6
+    scrollFrame.BackgroundTransparency = 0.2
+    scrollFrame.Name = "ItemRow"
+    Instance.new("UICorner", scrollFrame).CornerRadius = UDim.new(0, 10)
+    scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.X
+    scrollFrame.ClipsDescendants = false
+    scrollFrame.HorizontalScrollBarInset = Enum.ScrollBarInset.Always
+
+    local scrollLayout = Instance.new("UIListLayout", scrollFrame)
+    scrollLayout.FillDirection = Enum.FillDirection.Horizontal
+    scrollLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    scrollLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    scrollLayout.Padding = UDim.new(0, 10)
+
+    _G.FarmItemLabels = {}
+
+    for _, name in ipairs(watchedItems) do
+        local itemName = name:gsub("FoodModel", "")
+
+        local container = Instance.new("Frame", scrollFrame)
+        container.Size = UDim2.new(0, 140, 0, 80)
+        container.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        container.BackgroundTransparency = 0
+        Instance.new("UICorner", container).CornerRadius = UDim.new(0, 10)
+
+        local stroke = Instance.new("UIStroke", container)
+        stroke.Thickness = 1
+        stroke.Transparency = 0.4
+        stroke.Color = Color3.new(1, 1, 1)
+
+        local titleLabel = Instance.new("TextLabel", container)
+        titleLabel.Size = UDim2.new(1, 0, 0.4, 0)
+        titleLabel.Position = UDim2.new(0, 0, 0, 0)
+        titleLabel.BackgroundTransparency = 1
+        titleLabel.Text = itemName
+        titleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+        titleLabel.Font = Enum.Font.Gotham
+        titleLabel.TextSize = 18
+        titleLabel.TextYAlignment = Enum.TextYAlignment.Center
+
+        local valueLabel = Instance.new("TextLabel", container)
+        valueLabel.Size = UDim2.new(1, 0, 0.6, 0)
+        valueLabel.Position = UDim2.new(0, 0, 0.4, 0)
+        valueLabel.BackgroundTransparency = 1
+        valueLabel.Text = "0"
+        valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        valueLabel.Font = Enum.Font.GothamBlack
+        valueLabel.TextSize = 32
+        valueLabel.TextYAlignment = Enum.TextYAlignment.Center
+
+        _G.FarmItemLabels[itemName] = valueLabel
+    end
+
+    local bottomBox = Instance.new("Frame", centerFrame)
+    bottomBox.Size = UDim2.new(1, 0, 0, 60)
+    bottomBox.BackgroundTransparency = 1
+
+    local timeLabel = Instance.new("TextLabel", bottomBox)
+    timeLabel.Size = UDim2.new(0.5, -5, 1, 0)
+    timeLabel.Position = UDim2.new(0, 0, 0, 0)
+    timeLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    timeLabel.Text = "🕒 00:00"
+    timeLabel.TextColor3 = Color3.fromRGB(0, 255, 150)
+    timeLabel.Font = Enum.Font.GothamBold
+    timeLabel.TextSize = 20
+    Instance.new("UICorner", timeLabel).CornerRadius = UDim.new(0, 8)
+
+    local toggleButton = Instance.new("TextButton", bottomBox)
+    toggleButton.Size = UDim2.new(0.5, -5, 1, 0)
+    toggleButton.Position = UDim2.new(0.5, 5, 0, 0)
+    toggleButton.BackgroundColor3 = Color3.fromRGB(0, 200, 150)
+    toggleButton.Text = "⏸️ Stop"
+    toggleButton.Font = Enum.Font.GothamBlack
+    toggleButton.TextSize = 20
+    toggleButton.BorderSizePixel = 0
+    Instance.new("UICorner", toggleButton).CornerRadius = UDim.new(0, 8)
+
+    local stroke2 = Instance.new("UIStroke", toggleButton)
+    stroke2.Color = Color3.new(1, 1, 1)
+    stroke2.Transparency = 0.3
+    stroke2.Thickness = 2
+
+    toggleButton.MouseButton1Click:Connect(function()
+        isFarming = not isFarming
+        toggleButton.Text = isFarming and "⏸️ Stop" or "▶️ Start"
+        toggleButton.BackgroundColor3 = isFarming and Color3.fromRGB(0, 200, 150) or Color3.fromRGB(200, 50, 50)
+    end)
+
+    task.spawn(function()
+        while true do
+            local now = tick()
+            if now - lastUIUpdate >= UI_UPDATE_INTERVAL then
+                lastUIUpdate = now
+
+                local elapsed = now - farmStartTime
+                timeLabel.Text = string.format("🕒 %02d:%02d", math.floor(elapsed / 60), math.floor(elapsed % 60))
+
+                if not cachedData.Resources then
+                    cachedData.Resources = LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Resources")
+                end
+                local res = cachedData.Resources
+
+                if res then
+                    for _, name in ipairs(watchedItems) do
+                        local itemName = name:gsub("FoodModel", "")
+                        local val = res:FindFirstChild(itemName)
+                        local label = _G.FarmItemLabels[itemName]
+                        if label then
+                            if val and val.Value > 0 then
+                                label.Visible = true
+                                label.Text = tostring(val.Value)
+                            else
+                                label.Visible = false
+                            end
+                        end
+                    end
+                end
+
+                if not cachedData.Currency then
+                    cachedData.Currency = LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Currency")
+                end
+                local currency = cachedData.Currency
+
+                if currency then
+                    local coins = currency:FindFirstChild("Coins")
+                    if coins then
+                        local coinsValue = coins.Value
+                        local formattedCoins = tostring(coinsValue):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+                        coinsBox.Text = "💰 Coins: " .. formattedCoins
+                    end
+                end
+            end
+
+            task.wait(UI_UPDATE_INTERVAL)
+        end
+    end)
+end
+
+local checkPositions = {
+    Vector3.new(-266, 467, -394),
+    Vector3.new(1757, 783, 672),
+    Vector3.new(1420, 319, -1409),
+    Vector3.new(1922, 620, -2566),
+    Vector3.new(2226, 585, -4128),
+    Vector3.new(330, 901, -4304),
+    Vector3.new(-1433, 779, -4717),
+    Vector3.new(-3031, 780, -4211),
+    Vector3.new(-2643, 547, -2250),
+    Vector3.new(-857, 401, -2132),
+    Vector3.new(-828, 688, -3444),
+    Vector3.new(-1819, 405, 170),
+    Vector3.new(-1523, 962, 1150)
+}
+
+-- ✅ ลอยไปตำแหน่ง (float/lerp แทนการ teleport ทันที)
+local function floatToPosition(targetPos)
+    local root = Character:FindFirstChild("HumanoidRootPart")
+    if not root or not targetPos then return end
+
+    local startPos = root.Position
+    local endPos = targetPos + Vector3.new(0, 5, 0)
+    local steps = 20
+    local stepWait = FLOAT_SPEED / steps
+
+    for i = 1, steps do
+        local alpha = i / steps
+        local lerpPos = startPos:Lerp(endPos, alpha)
+        root.CFrame = CFrame.new(lerpPos)
+        task.wait(stepWait)
+    end
+end
+
+-- ✅ ลอยไปหาต้นไม้ (float แทน teleport)
+local function floatToTarget(part, offsetY)
+    local root = Character:FindFirstChild("HumanoidRootPart")
+    if not root or not part then return end
+
+    local targetPos = part.Position - Vector3.new(0, offsetY or 0, 0)
+    local startPos = root.Position
+    local steps = 15
+    local stepWait = FLOAT_SPEED / steps
+
+    for i = 1, steps do
+        local alpha = i / steps
+        local lerpPos = startPos:Lerp(targetPos, alpha)
+        root.CFrame = CFrame.new(lerpPos)
+        task.wait(stepWait)
+    end
+end
+
+local function findFoodNode()
+    local foodFolder = workspace:FindFirstChild("Interactions")
+        and workspace.Interactions:FindFirstChild("Nodes")
+        and workspace.Interactions.Nodes:FindFirstChild("Food")
+
+    if not foodFolder then return nil end
+
+    for _, node in ipairs(foodFolder:GetChildren()) do
+        if node:IsA("Model") and node.Name == "LargeFoodNode" then
+            local part = node:FindFirstChild("BillboardPart")
+            local health = part and part:FindFirstChild("Health")
+            if part and health and health.Value > 0 then
+                return node, part
+            end
+        end
+    end
+    return nil
+end
+
+local function sellEverythingInInventory()
+    local res = LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Resources")
+    if not res then return end
+    local args = {}
+    for _, item in ipairs(res:GetChildren()) do
+        if item:IsA("NumberValue") and item.Value >= 200 then
+            table.insert(args, {
+                ItemName = item.Name,
+                Amount = 10000
+            })
+        end
+    end
+    if #args > 0 then
+        ReplicatedStorage.Remotes.SellItemRemote:FireServer(unpack(args))
+        print("✅ ขายไอเทมทั้งหมดในกระเป๋าแล้ว")
+    end
+end
+
+local function allWatchedItemsReachedTarget()
+    local res = LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Resources")
+    if not res then return false end
+    for _, itemName in ipairs(watchedItems) do
+        local cleanName = itemName:gsub("FoodModel", "")
+        local val = res:FindFirstChild(cleanName)
+        if not val or val.Value < 10000 then
+            return false
+        end
+    end
+    return true
+end
+
+local function checkAndSell()
+    local res = LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Resources")
+    if not res then return end
+    local remoteTeleport = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("WorldTeleportRemote")
+
+    if game.PlaceId == SELL_WORLD_ID then
+        local sold = false
+        for _, itemName in ipairs(watchedItems) do
+            local cleanName = itemName:gsub("FoodModel", "")
+            local val = res:FindFirstChild(cleanName)
+            if val and val.Value >= 50 then
+                ReplicatedStorage.Remotes.SellItemRemote:FireServer({
+                    ItemName = cleanName,
+                    Amount = 10000
+                })
+                sold = true
+                task.wait(0.5)
+            end
+        end
+        if sold then
+            task.wait(2)
+            print("✅ ขายเสร็จ → วาร์ปกลับโลกฟาร์ม")
+            local args = { FARM_WORLD_ID, {} }
+            remoteTeleport:InvokeServer(unpack(args))
+        end
+    else
+        if allWatchedItemsReachedTarget() then
+            print("🕓 รอ 5 วิ ก่อนวาร์ปไปขาย...")
+            task.wait(5)
+            print("🛫 ทุกไอเทมถึง 10000 แล้ว → วาร์ปไปโลกขาย")
+            local args = { SELL_WORLD_ID, {} }
+            remoteTeleport:InvokeServer(unpack(args))
+        end
+    end
+end
+
+-- ✅ ป้องกันตกโลก
+local lastFallCheck = 0
+RunService.Heartbeat:Connect(function()
+    local now = tick()
+    if now - lastFallCheck >= 0.5 then
+        lastFallCheck = now
+        local hrp = Character:FindFirstChild("HumanoidRootPart")
+        if hrp and hrp.Position.Y < -100 then
+            hrp.CFrame = CFrame.new(lastSafePosition)
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        pcall(checkAndSell)
+        task.wait(2)
+    end
+end)
+
+-- ✅ Anti-AFK
+task.spawn(function()
+    while true do
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+        print("🛡️ Anti-AFK: คลิกกันหลุด")
+        task.wait(300)
+    end
+end)
+
+-- ✅ Boost FPS
+local isFPSBoosted = false
+local function boostFPS()
+    if isFPSBoosted then return end
+    isFPSBoosted = true
+
+    print("⚙️ เริ่มปรับแต่ง FPS...")
+
+    local lighting = game:GetService("Lighting")
+    lighting.GlobalShadows = false
+    lighting.FogEnd = 1000000
+    lighting.FogStart = 1000000
+    lighting.Brightness = 0
+    lighting.OutdoorAmbient = Color3.new(0.1, 0.1, 0.1)
+    lighting.Ambient = Color3.new(0.1, 0.1, 0.1)
+
+    for _, effect in ipairs(lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            effect.Enabled = false
+        end
+    end
+
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain.WaterTransparency = 1
+        terrain.WaterReflectance = 0
+        terrain.WaveSize = 0
+        terrain.WaveSpeed = 0
+    end
+
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    print("✅ ปรับ FPS เบื้องต้นเสร็จ")
+end
+
+local isObjectsRemoved = false
+local function removeUnnecessaryObjects()
+    if isObjectsRemoved then return end
+    isObjectsRemoved = true
+
+    print("🗑️ เริ่มลบโมเดลที่ไม่จำเป็น...")
+    local objectsToDestroy = {}
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        pcall(function()
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Smoke")
+               or obj:IsA("Fire") or obj:IsA("Beam") or obj:IsA("Explosion")
+               or obj:IsA("Sparkles") then
+                table.insert(objectsToDestroy, obj)
+            elseif obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+                obj.Enabled = false
+            elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                obj.Transparency = 1
+            elseif obj:IsA("BasePart") then
+                obj.Material = Enum.Material.SmoothPlastic
+                obj.Reflectance = 0
+                obj.CastShadow = false
+            end
+        end)
+    end
+
+    for _, obj in ipairs(objectsToDestroy) do
+        pcall(function() obj:Destroy() end)
+    end
+
+    print("✅ ลบโมเดลเสร็จ - ประมวลผล " .. #objectsToDestroy .. " objects")
+end
+
+local function optimizeRendering()
+    local lighting = game:GetService("Lighting")
+    lighting.GlobalShadows = false
+    lighting.ShadowSoftness = 0
+    workspace.StreamingEnabled = true
+    workspace.StreamingMinRadius = 64
+    workspace.StreamingTargetRadius = 128
+    print("✅ ปรับ Rendering เสร็จ")
+end
+
+local function fullFPSBoost()
+    print("🚀 เริ่มการปรับแต่ง FPS แบบเต็มรูปแบบ...")
+    boostFPS()
+    task.wait(0.3)
+    removeUnnecessaryObjects()
+    task.wait(0.3)
+    optimizeRendering()
+    print("🎯 ปรับแต่ง FPS เสร็จสิ้น!")
+end
+
+local function continuousCleanup()
+    task.spawn(function()
+        while true do
+            if afkMode then
+                pcall(function()
+                    for _, obj in ipairs(workspace:GetDescendants()) do
+                        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
+                            if obj.Enabled then obj.Enabled = false end
+                        end
+                    end
+                end)
+            end
+            task.wait(10)
+        end
+    end)
+end
+
+local function toggleAFKMode()
+    afkMode = not afkMode
+
+    if afkMode then
+        if not afkOverlay then
+            afkOverlay = Instance.new("Frame")
+            afkOverlay.Size = UDim2.new(1, 0, 1, 0)
+            afkOverlay.Position = UDim2.new(0, 0, 0, 0)
+            afkOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
+            afkOverlay.BackgroundTransparency = 0
+            afkOverlay.ZIndex = 9999
+            afkOverlay.Name = "AFKOverlay"
+            afkOverlay.Parent = LocalPlayer:WaitForChild("PlayerGui")
+        end
+        afkOverlay.Visible = true
+        fullFPSBoost()
+        continuousCleanup()
+    else
+        if afkOverlay then afkOverlay.Visible = false end
+    end
+end
+
+local function getRemote(name)
+    if cachedRemotes[name] then return cachedRemotes[name] end
+
+    for i = 1, 100 do
+        local dragon = Character:FindFirstChild("Dragons") and Character.Dragons:FindFirstChild(tostring(i))
+        if dragon and dragon:FindFirstChild("Remotes") then
+            local remote = dragon.Remotes:FindFirstChild(name)
+            if remote then
+                cachedRemotes[name] = remote
+                return remote
+            end
+        end
+    end
+    return nil
+end
+
+local function getHealth(part)
+    return part and part:FindFirstChild("Health")
+end
+
+local lastPullTime = 0
+
+local function pullItemToPlayer()
+    local now = tick()
+    if now - lastPullTime < PULL_INTERVAL then return end
+    lastPullTime = now
+
+    local root = Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    for _, source in ipairs({workspace, workspace:FindFirstChild("Camera")}) do
+        if not source then continue end
+        for _, obj in ipairs(source:GetChildren()) do
+            if table.find(targetNames, obj.Name) and obj:IsA("Model") then
+                pcall(function()
+                    if not obj.PrimaryPart then
+                        obj.PrimaryPart = obj:FindFirstChildWhichIsA("BasePart")
+                    end
+                    if obj.PrimaryPart then
+                        obj:SetPrimaryPartCFrame(CFrame.new(root.Position + Vector3.new(0, 1, 0)))
+                    end
+                end)
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        pcall(pullItemToPlayer)
+        task.wait(PULL_INTERVAL)
+    end
+end)
+
+local function distanceXZ(a, b)
+    local dxz = Vector3.new(a.X, 0, a.Z) - Vector3.new(b.X, 0, b.Z)
+    return dxz.Magnitude
+end
+
+-- ✅ โจมตีและลงช้าๆ ทีละ DESCENT_STEP
+local function attackTarget(part)
+    local remote = getRemote("PlaySoundRemote")
+    if not remote then return end
+
+    local health = getHealth(part)
+    if not health then return end
+    if health.Value <= 0 then return end
+
+    local root = Character:FindFirstChild("HumanoidRootPart")
+
+    -- ลอยไปหาต้นไม้ก่อน (แทน teleport ทันที)
+    if distanceXZ(root.Position, part.Position) > HORIZONTAL_DISTANCE_THRESHOLD then
+        floatToTarget(part, TELEPORT_NEAR_TREE_OFFSET)
+        task.wait(0.3)
+    end
+
+    local offset = MAX_UNDERGROUND_OFFSET
+    local success = false
+
+    -- ลงช้าๆ ทีละ DESCENT_STEP (เดิมลงทีละ 5 ไม่มี delay)
+    while offset >= MIN_UNDERGROUND_OFFSET do
+        floatToTarget(part, offset)     -- ลอยไปแทน teleport
+        task.wait(DESCENT_WAIT)         -- หน่วงระหว่างลงแต่ละขั้น
+
+        local before = health.Value
+        for _ = 1, ATTACK_REPEAT do
+            remote:FireServer("Breath", "Destructibles", part)
+            task.wait(ATTACK_WAIT)      -- หน่วงระหว่าง attack แต่ละครั้ง
+        end
+
+        if health.Value < before then
+            lastSafePosition = part.Position + Vector3.new(0, 10, 0)
+            success = true
+            break
+        end
+        offset -= DESCENT_STEP          -- ลงทีละน้อย (เดิม -= 5)
+    end
+
+    if success then
+        while health.Value > 0 do
+            for _ = 1, ATTACK_REPEAT do
+                remote:FireServer("Breath", "Destructibles", part)
+                task.wait(ATTACK_WAIT)
+            end
+            pullItemToPlayer()
+            task.wait(0.1)
+        end
+    end
+
+    floatToTarget(part, MAX_UNDERGROUND_OFFSET) -- ลอยกลับขึ้น
+end
+
+local lastFarmCheck = 0
+
+RunService.Heartbeat:Connect(function(dt)
+    local now = tick()
+    if now - lastFarmCheck >= FARM_CHECK_INTERVAL then
+        lastFarmCheck = now
+        if not isFarming then return end
+
+        local node, part = findFoodNode()
+
+        if node and part then
+            pcall(function() attackTarget(part) end)
+            currentCheckIndex = 1
+        else
+            if currentCheckIndex <= #checkPositions then
+                floatToPosition(checkPositions[currentCheckIndex])  -- ลอยไปแทน teleport ทันที
+                currentCheckIndex = currentCheckIndex + 1
+            else
+                currentCheckIndex = 1
+            end
+
+            task.wait(1)  -- รอนานขึ้นหลังลอยถึง
+
+            local checkNode, checkPart = findFoodNode()
+            if checkNode and checkPart then
+                pcall(function() attackTarget(checkPart) end)
+                currentCheckIndex = 1
+            end
+        end
+    end
+end)
+
+-- ✅ Memory Management
+task.spawn(function()
+    while true do
+        task.wait(300)
+        for k, v in pairs(cachedRemotes) do
+            if not v or not v.Parent then
+                cachedRemotes[k] = nil
+            end
+        end
+        cachedData = {}
+        collectgarbage("collect")
+    end
+end)
+
+-- ✅ เรียก UI และเริ่มระบบ
+createCombinedUI()
+task.spawn(boostFPS)
+
+print("✅ NEXON HUB Slow Mode เริ่มทำงาน")
+
+----------------------------------------------------
+-- 🧠 Self-Watcher
+----------------------------------------------------
+local function safeRunScript()
+    local ok, err = pcall(function()
+        if _G.__on_check then
+            _G.__on_check()
+        else
+            if not findFoodNode or not attackTarget then
+                error("Core function missing")
+            end
+        end
+    end)
+
+    if not ok then
+        warn("⚠️ Script error detected:", err)
+        print("🔁 กำลังรีโหลดสคริปต์ใหม่...")
+        local baseURL = "https://4b1fe127-404d-4123-9847-171a3880f398-00-3khp1tc8bd7r3.sisko.replit.dev/"
+        local token = "your-token-here"
+        local fileName = "your-file-name.lua"
+        local finalURL = baseURL .. "get-script?token=" .. token .. "&file=" .. fileName
+
+        local ok2, result = pcall(function()
+            return game:HttpGet(finalURL)
+        end)
+
+        if ok2 then
+            local success, loadErr = pcall(function()
+                loadstring(result)()
+            end)
+            if success then
+                print("✅ รีโหลดสคริปต์ใหม่สำเร็จ!")
+            else
+                warn("❌ โหลดสคริปต์ใหม่ไม่สำเร็จ:", loadErr)
+            end
+        else
+            warn("❌ โหลดสคริปต์ใหม่จากเซิร์ฟเวอร์ล้มเหลว:", result)
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(safeRunScript)
+    end
+end)
